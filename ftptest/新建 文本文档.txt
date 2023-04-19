@@ -1,0 +1,476 @@
+//TURN服务器程序
+#pragma GCC optimize(2)
+#include <iostream>
+#include <iomanip>
+#include <dirent.h>
+#include <cstdlib>
+#include <termios.h>
+#include <unistd.h>
+#include <string>
+#include <cstring>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <arpa/inet.h>
+#include <pwd.h>
+#include <sys/stat.h>
+#include <vector>
+#include <algorithm>
+#include <fstream>
+#include <sys/time.h>
+#include <stdio.h>
+#include <grp.h>
+#include <sys/syscall.h>
+#include <unordered_map>
+#include <unordered_set>
+#include <set>
+#include <queue>
+
+using namespace std;
+
+#define BUFSIZE 512
+#define BACKLOG 100
+#define MAXCON 100
+#define NATPORT 20324
+
+class info
+{
+public:
+	int fd;
+	sockaddr_in addr;
+
+	info()
+	{
+		fd = -1;
+		memset(&addr, 0, sizeof(sockaddr_in));
+	}
+
+	info(int& _fd, sockaddr_in& _addr)
+	{
+		fd = _fd;
+		addr = _addr;
+	}
+};
+
+unordered_map<string, info> con_hash; //key: "ip"
+queue<string> con_list;
+vector<info> trans(2), datat(2);
+
+void DataTrans1()
+{
+	info from = datat[0], to = datat[1];
+	timeval timeo = { 1, 200000 };
+	setsockopt(from.fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	setsockopt(from.fd, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	setsockopt(to.fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	setsockopt(to.fd, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	char buf[BUFSIZE + 1];
+	int num;
+	while (true)
+	{
+		num = recv(from.fd, buf, BUFSIZE, 0);
+		if (num == -1)
+		{
+			break;
+		}
+		buf[num] = 0;
+		if (send(to.fd, buf, num, 0) == -1)
+		{
+			break;
+		}
+	}
+	close(from.fd);
+	close(to.fd);
+}
+
+void DataTrans2()
+{
+	info from = datat[1], to = datat[0];
+	timeval timeo = { 1, 200000 };
+	setsockopt(from.fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	setsockopt(from.fd, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	setsockopt(to.fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	setsockopt(to.fd, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	char buf[BUFSIZE + 1];
+	int num;
+	while (true)
+	{
+		num = recv(from.fd, buf, BUFSIZE, 0);
+		if (num == -1)
+		{
+			break;
+		}
+		buf[num] = 0;
+		if (send(to.fd, buf, num, 0) == -1)
+		{
+			break;
+		}
+	}
+	close(from.fd);
+	close(to.fd);
+}
+
+void CtoS()
+{
+	info from = trans[1], to = trans[0];
+	timeval timeo = { 400, 0 };
+	setsockopt(from.fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	setsockopt(from.fd, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	setsockopt(to.fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	setsockopt(to.fd, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	char buf[BUFSIZE + 1];
+	int num;
+	string cmd, res;
+	sockaddr_in ser_addr_rand_port, ftp_ser_addr, ftp_cl_addr;
+	socklen_t len = sizeof(sockaddr);
+	while (true)
+	{
+		num = recv(from.fd, buf, BUFSIZE, 0);
+		if (num == -1)
+		{
+			break;
+		}
+		buf[num] = 0;
+		cmd = buf;
+		if (cmd.substr(0, 4) == "PORT")
+		{
+			res = "510 NAT traversal service doesn't support active mode.\r\n";
+			if (send(from.fd, buf, num, 0) == -1)
+			{
+				break;
+			}
+		}
+		else
+		{
+			if (cmd.substr(0, 4) == "PASV")
+			{
+				int lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+				while (lis_tmp == -1)
+				{
+					lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+				}
+				memset(&ser_addr_rand_port, 0, sizeof(sockaddr_in));
+				ser_addr_rand_port.sin_family = AF_INET;
+				while (bind(lis_tmp, (sockaddr*)&ser_addr_rand_port, sizeof(sockaddr)) == -1);
+				if ((listen(lis_tmp, 1)) == -1)
+				{
+					close(lis_tmp);
+					cout << "Error!\n";
+					continue;
+				}
+				if (getsockname(lis_tmp, (sockaddr*)&ser_addr_rand_port, &len) == -1)
+				{
+					close(lis_tmp);
+					cout << "Error!\n";
+					break;
+				}
+				string res = "DATA " + to_string(ntohs(ser_addr_rand_port.sin_port)) + "\r\n";
+				while (send(to.fd, res.c_str(), res.size(), 0) == -1);
+				memset(&ftp_ser_addr, 0, sizeof(sockaddr_in));
+				int ser_fd = accept(lis_tmp, (sockaddr*)&ftp_ser_addr, &len);
+				if (ser_fd == -1)
+				{
+					close(lis_tmp);
+					cout << "Error!\n";
+					break;
+				}
+				close(lis_tmp);
+				lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+				while (lis_tmp == -1)
+				{
+					lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+				}
+				memset(&ser_addr_rand_port, 0, sizeof(sockaddr_in));
+				ser_addr_rand_port.sin_family = AF_INET;
+				while (bind(lis_tmp, (sockaddr*)&ser_addr_rand_port, sizeof(sockaddr)) == -1);
+				if ((listen(lis_tmp, 1)) == -1)
+				{
+					close(lis_tmp);
+					cout << "Error!\n";
+					continue;
+				}
+				len = sizeof(sockaddr);
+				if (getsockname(lis_tmp, (sockaddr*)&ser_addr_rand_port, &len) == -1)
+				{
+					close(lis_tmp);
+					cout << "Error!\n";
+					break;
+				}
+				res = "250 " + to_string(ntohs(ser_addr_rand_port.sin_port)) + "\r\n";
+				while (send(from.fd, res.c_str(), res.size(), 0) == -1);
+				memset(&ftp_cl_addr, 0, sizeof(sockaddr_in));
+				int cl_fd = accept(lis_tmp, (sockaddr*)&ftp_cl_addr, &len);
+				if (cl_fd == -1)
+				{
+					close(lis_tmp);
+					cout << "Error!\n";
+					break;
+				}
+				close(lis_tmp);
+				info ss(ser_fd, ftp_ser_addr), cc(cl_fd, ftp_cl_addr);
+				datat[0] = ss, datat[1] = cc;
+				if (!fork())
+				{
+					if (!fork())
+					{
+						DataTrans1();
+					}
+					else
+					{
+						DataTrans2();
+					}
+					exit(0);
+				}
+				close(ser_fd);
+				close(cl_fd);
+			}
+			else
+			{
+				if (send(to.fd, buf, num, 0) == -1)
+				{
+					break;
+				}
+			}
+		}
+	}
+	close(from.fd);
+	close(to.fd);
+}
+
+void StoC()
+{
+	info from = trans[0], to = trans[1];
+	timeval timeo = { 400, 0 };
+	setsockopt(from.fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	setsockopt(from.fd, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	setsockopt(to.fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	setsockopt(to.fd, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	char buf[BUFSIZE + 1];
+	int num;
+	while (true)
+	{
+		num = recv(from.fd, buf, BUFSIZE, 0);
+		if (num == -1)
+		{
+			break;
+		}
+		buf[num] = 0;
+		if (send(to.fd, buf, num, 0) == -1)
+		{
+			break;
+		}
+	}
+	close(from.fd);
+	close(to.fd);
+}
+
+int main()
+{
+	sockaddr_in ser_addr, cl_addr;
+	memset(&ser_addr, 0, sizeof(sockaddr_in));
+	ser_addr.sin_addr.s_addr = INADDR_ANY;
+	ser_addr.sin_port = htons(NATPORT);
+	ser_addr.sin_family = AF_INET;
+	int lis_fd;
+	while ((lis_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1);
+	int opt = 1;
+	setsockopt(lis_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+	timeval timeo = { 86400, 0 };
+	setsockopt(lis_fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
+	setsockopt(lis_fd, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	if ((bind(lis_fd, (sockaddr*)&ser_addr, sizeof(sockaddr))) == -1)
+	{
+		cout << "Cannot bind to port " << NATPORT << ".\nThe possible reason is anothor program is using this port.\n";
+		close(lis_fd);
+		return 1;
+	}
+	if ((listen(lis_fd, BACKLOG)) == -1)
+	{
+		cout << "An error occurs while listening.\n";
+		close(lis_fd);
+		return 1;
+	}
+	while (true)
+	{
+		memset(&cl_addr, 0, sizeof(sockaddr_in));
+		socklen_t sin_size = sizeof(sockaddr_in);
+		int new_fd = accept(lis_fd, (sockaddr*)&cl_addr, &sin_size);
+		if (new_fd == -1)
+		{
+			cout << "An error occurs while accepting.\n";
+			close(lis_fd);
+			return 1;
+		}
+		char buf[BUFSIZE + 1];
+		int num = recv(new_fd, buf, BUFSIZE, 0);
+		if (num == -1)
+		{
+			close(new_fd);
+			continue;
+		}
+		buf[num] = 0;
+		string op = buf;
+		if (op.substr(0, 4) == "CONS")
+		{
+			int lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+			while (lis_tmp == -1)
+			{
+				lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+			}
+			sockaddr_in ser_addr_rand_port;
+			memset(&ser_addr_rand_port, 0, sizeof(sockaddr_in));
+			ser_addr_rand_port.sin_family = AF_INET;
+			while (bind(lis_tmp, (sockaddr*)&ser_addr_rand_port, sizeof(sockaddr)) == -1);
+			if ((listen(lis_tmp, 1)) == -1)
+			{
+				close(lis_tmp);
+				cout << "Error!\n";
+				close(new_fd);
+				continue;
+			}
+			socklen_t len = sizeof(sockaddr);
+			if (getsockname(lis_tmp, (sockaddr*)&ser_addr_rand_port, &len) == -1)
+			{
+				close(lis_tmp);
+				cout << "Error!\n";
+				close(new_fd);
+				continue;
+			}
+			string res = "250 " + to_string(ntohs(ser_addr_rand_port.sin_port)) + "\r\n";
+			while (send(new_fd, res.c_str(), res.size(), 0) == -1);
+			sockaddr_in ftp_ser_addr;
+			memset(&ftp_ser_addr, 0, sizeof(sockaddr_in));
+			int con_fd = accept(lis_tmp, (sockaddr*)&ftp_ser_addr, &sin_size);
+			if (con_fd == -1)
+			{
+				close(lis_tmp);
+				cout << "Error!\n";
+				close(new_fd);
+				continue;
+			}
+			close(lis_tmp);
+			string ip = inet_ntoa(ftp_ser_addr.sin_addr);
+			info tmp(con_fd, ftp_ser_addr);
+			con_hash[ip] = tmp;
+			if (con_hash.size() != con_list.size())
+			{
+				con_list.push(ip);
+			}
+			if (con_list.size() > MAXCON)
+			{
+				close(con_hash[con_list.front()].fd);
+				con_hash.erase(con_list.front());
+				con_list.pop();
+			}
+		}
+		if (op.substr(0, 4) == "CONC")
+		{
+			string ip = "", res;
+			if (op.size() > 6)
+			{
+				ip = op.substr(5, op.size() - 7);
+			}
+			if (con_hash.find(ip) == con_hash.end())
+			{
+				res = "500 Target Not Found.\r\n";
+				while (send(new_fd, res.c_str(), res.size(), 0) == -1);
+				close(new_fd);
+				continue;
+			}
+			int lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+			while (lis_tmp == -1)
+			{
+				lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+			}
+			sockaddr_in ser_addr_rand_port;
+			memset(&ser_addr_rand_port, 0, sizeof(sockaddr_in));
+			ser_addr_rand_port.sin_family = AF_INET;
+			while (bind(lis_tmp, (sockaddr*)&ser_addr_rand_port, sizeof(sockaddr)) == -1);
+			if ((listen(lis_tmp, 1)) == -1)
+			{
+				close(lis_tmp);
+				cout << "Error!\n";
+				close(new_fd);
+				continue;
+			}
+			socklen_t len = sizeof(sockaddr);
+			if (getsockname(lis_tmp, (sockaddr*)&ser_addr_rand_port, &len) == -1)
+			{
+				close(lis_tmp);
+				cout << "Error!\n";
+				close(new_fd);
+				continue;
+			}
+			res = "250 " + to_string(ntohs(ser_addr_rand_port.sin_port)) + "\r\n";
+			while (send(new_fd, res.c_str(), res.size(), 0) == -1);
+			sockaddr_in ftp_cl_addr;
+			memset(&ftp_cl_addr, 0, sizeof(sockaddr_in));
+			int cl_fd = accept(lis_tmp, (sockaddr*)&ftp_cl_addr, &sin_size);
+			if (cl_fd == -1)
+			{
+				close(lis_tmp);
+				cout << "Error!\n";
+				close(new_fd);
+				continue;
+			}
+			close(lis_tmp);
+			lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+			while (lis_tmp == -1)
+			{
+				lis_tmp = socket(AF_INET, SOCK_STREAM, 0);
+			}
+			memset(&ser_addr_rand_port, 0, sizeof(sockaddr_in));
+			ser_addr_rand_port.sin_family = AF_INET;
+			while (bind(lis_tmp, (sockaddr*)&ser_addr_rand_port, sizeof(sockaddr)) == -1);
+			if ((listen(lis_tmp, 1)) == -1)
+			{
+				close(lis_tmp);
+				cout << "Error!\n";
+				close(new_fd);
+				continue;
+			}
+			len = sizeof(sockaddr);
+			if (getsockname(lis_tmp, (sockaddr*)&ser_addr_rand_port, &len) == -1)
+			{
+				close(lis_tmp);
+				cout << "Error!\n";
+				close(new_fd);
+				continue;
+			}
+			res = "250 " + to_string(ntohs(ser_addr_rand_port.sin_port)) + "\r\n";
+			while (send(con_hash[ip].fd, res.c_str(), res.size(), 0) == -1);
+			sockaddr_in ftp_ser_addr;
+			memset(&ftp_ser_addr, 0, sizeof(sockaddr_in));
+			int ser_fd = accept(lis_tmp, (sockaddr*)&ftp_ser_addr, &sin_size);
+			if (ser_fd == -1)
+			{
+				close(lis_tmp);
+				cout << "Error!\n";
+				close(new_fd);
+				continue;
+			}
+			close(lis_tmp);
+			info ss(ser_fd, ftp_ser_addr), cc(cl_fd, ftp_cl_addr);
+			trans[0] = ss, trans[1] = cc;
+			if (!fork())
+			{
+				if (!fork())
+				{
+					StoC();
+				}
+				else
+				{
+					CtoS();
+				}
+				exit(0);
+			}
+			close(ser_fd);
+			close(cl_fd);
+		}
+		close(new_fd);
+	}
+	return 0;
+}
